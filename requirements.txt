@@ -19,3 +19,12 @@ optimum-quanto==0.2.6
 scenedetect
 moviepy==1.0.3
 decord
+
+# Directly imported by app.py, wan/ and kokoro/ (were missing before)
+torch>=2.1.0
+torchvision>=0.16.0
+einops>=0.6.0
+xformers>=0.0.22
+librosa>=0.10.0
+soundfile>=0.12.0
+fastapi>=0.110.0

@@ -1,0 +1,8 @@
+# Keep the deployment bundle small
+.git
+__pycache__
+*.pyc
+.venv
+weights
+save_audio
+assets

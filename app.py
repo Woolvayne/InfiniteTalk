@@ -5,6 +5,7 @@ import os
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 import sys
 import json
+import threading
 import warnings
 from datetime import datetime
 
@@ -58,7 +59,7 @@ def _validate_args(args):
         task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
-def _parse_args():
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Generate a image or video from a text prompt or image using Wan"
     )
@@ -158,7 +159,7 @@ def _parse_args():
     parser.add_argument(
         "--audio_save_dir",
         type=str,
-        default='save_audio/gradio',
+        default=os.environ.get("AUDIO_SAVE_DIR", 'save_audio/gradio'),
         help="The path to save the audio embedding.")
     parser.add_argument(
         "--base_seed",
@@ -248,7 +249,7 @@ def _parse_args():
         default=None,
         help="Quantization type, must be 'int8' or 'fp8'."
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     _validate_args(args)
     return args
 
@@ -428,7 +429,45 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     # sum, _ = librosa.load(save_path_sum, sr=16000)
     return s1, s2, save_path_sum
 
-def run_graio_demo(args):
+def _init_models(args, rank, world_size, local_rank, device):
+    """Load the wav2vec audio encoder and the InfiniteTalk pipeline."""
+    wav2vec_feature_extractor, audio_encoder = custom_init('cpu', args.wav2vec_dir)
+    os.makedirs(args.audio_save_dir, exist_ok=True)
+
+    logging.info("Creating MultiTalk pipeline.")
+    wan_i2v = wan.InfiniteTalkPipeline(
+        config=WAN_CONFIGS[args.task],
+        checkpoint_dir=args.ckpt_dir,
+        quant_dir=args.quant_dir,
+        device_id=device,
+        rank=rank,
+        t5_fsdp=args.t5_fsdp,
+        dit_fsdp=args.dit_fsdp,
+        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
+        t5_cpu=args.t5_cpu,
+        lora_dir=args.lora_dir,
+        lora_scales=args.lora_scale,
+        quant=args.quant,
+        dit_path=args.dit_path,
+        infinitetalk_dir=args.infinitetalk_dir
+    )
+
+    if args.num_persistent_param_in_dit is not None:
+        wan_i2v.vram_management = True
+        wan_i2v.enable_vram_management(
+            num_persistent_param_in_dit=args.num_persistent_param_in_dit
+        )
+    return wav2vec_feature_extractor, audio_encoder, wan_i2v
+
+
+def build_demo(args, lazy_model_init=False):
+    """Build (but do not launch) the Gradio demo.
+
+    With ``lazy_model_init=True`` the multi-gigabyte checkpoints are only
+    loaded once the first video is requested, so that merely importing this
+    module - as done by ASGI servers such as Vercel - stays cheap and works
+    without the model weights being present.
+    """
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
@@ -483,41 +522,28 @@ def run_graio_demo(args):
         args.base_seed = base_seed[0]
 
     assert args.task == "infinitetalk-14B", 'You should choose multitalk in args.task.'
-    
 
-    
-    wav2vec_feature_extractor, audio_encoder= custom_init('cpu', args.wav2vec_dir)
-    os.makedirs(args.audio_save_dir,exist_ok=True)
+    models = None
+    if not lazy_model_init:
+        models = _init_models(args, rank, world_size, local_rank, device)
+    _models_lock = threading.Lock()
 
-
-    logging.info("Creating MultiTalk pipeline.")
-    wan_i2v = wan.InfiniteTalkPipeline(
-        config=cfg,
-        checkpoint_dir=args.ckpt_dir,
-        quant_dir=args.quant_dir,
-        device_id=device,
-        rank=rank,
-        t5_fsdp=args.t5_fsdp,
-        dit_fsdp=args.dit_fsdp, 
-        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),  
-        t5_cpu=args.t5_cpu,
-        lora_dir=args.lora_dir,
-        lora_scales=args.lora_scale,
-        quant=args.quant,
-        dit_path=args.dit_path,
-        infinitetalk_dir=args.infinitetalk_dir
-    )
-
-    if args.num_persistent_param_in_dit is not None:
-        wan_i2v.vram_management = True
-        wan_i2v.enable_vram_management(
-            num_persistent_param_in_dit=args.num_persistent_param_in_dit
-        )
+    def _get_models():
+        # Checkpoints are multi-gigabyte; load them on first use so that
+        # importing this module stays cheap (see build_demo docstring).
+        nonlocal models
+        if models is None:
+            with _models_lock:
+                if models is None:
+                    models = _init_models(
+                        args, rank, world_size, local_rank, device)
+        return models
 
 
     
     def generate_video(img2vid_image, vid2vid_vid, task_mode, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,
                     sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select, human1_voice, human2_voice):
+        wav2vec_feature_extractor, audio_encoder, wan_i2v = _get_models()
         input_data = {}
         input_data["prompt"] = img2vid_prompt
         if task_mode=='VideoDubbing':
@@ -808,12 +834,42 @@ def run_graio_demo(args):
             inputs=[img2vid_image, vid2vid_vid, task_mode, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select, human1_voice, human2_voice],
             outputs=[result_gallery],
         )
+
+    return demo
+
+
+def run_graio_demo(args):
+    """CLI entry point: build the demo and serve it locally."""
+    demo = build_demo(args)
     demo.launch(server_name="0.0.0.0", debug=True, server_port=8418)
 
-        
+
+def _adapt_args_for_serverless(args):
+    """Vercel's filesystem is read-only outside of /tmp."""
+    if os.environ.get("VERCEL"):
+        args.audio_save_dir = os.environ.get("AUDIO_SAVE_DIR", "/tmp/save_audio")
+        if args.save_file is None:
+            args.save_file = "/tmp/infinitetalk"
+    return args
+
+
+def create_app():
+    """Build the ASGI application served by Vercel.
+
+    Vercel requires the Python entrypoint to export a top-level ``app``,
+    ``application`` or ``handler`` variable. Mounting the Gradio UI on a
+    FastAPI app is the deployment pattern documented by Gradio.
+    """
+    from fastapi import FastAPI
+
+    args = _parse_args([])  # serverless: use the defaults, no CLI flags
+    _adapt_args_for_serverless(args)
+    demo = build_demo(args, lazy_model_init=True)
+    return gr.mount_gradio_app(FastAPI(), demo, path="/")
 
 
 if __name__ == "__main__":
-    args = _parse_args()
-    run_graio_demo(args)
-    
+    run_graio_demo(_parse_args())
+else:
+    # Imported by an ASGI server (e.g. Vercel) -> expose `app`.
+    app = create_app()

@@ -364,6 +364,47 @@ python app.py \
 ```
 
 
+## 🚀 Deployment
+
+`app.py` works both as a local CLI app and as an ASGI application, so the same
+code can be served by any ASGI server or by Vercel.
+
+### Local / any GPU machine
+
+```bash
+python app.py --ckpt_dir weights/Wan2.1-I2V-14B-480P --wav2vec_dir weights/chinese-wav2vec2-base --infinitetalk_dir weights/InfiniteTalk/single/infinitetalk.safetensors
+```
+
+Or, if you prefer to run it behind your own ASGI server (e.g. on a GPU VM):
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8418
+```
+
+### Vercel
+
+`app.py` exports the ASGI application as a top-level `app` variable (the Gradio
+UI mounted on FastAPI), which is what Vercel's Python runtime looks for, and
+`vercel.json` routes every request to it. Deploy with:
+
+```bash
+vercel --prod
+```
+
+Useful environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AUDIO_SAVE_DIR` | `save_audio/gradio` | Where audio embeddings are written. On Vercel this is switched to `/tmp/save_audio` automatically, because the rest of the filesystem is read-only. |
+| `VERCEL` | – | Set by Vercel itself; triggers the serverless path adaptations above. |
+
+Please note the platform limits before deploying: Vercel serverless functions
+are capped at 250 MB (bundle), have no GPU and are limited to `maxDuration`
+seconds per request. The InfiniteTalk checkpoints are multi-gigabyte and need a
+CUDA GPU, so a production deployment belongs on a GPU host (e.g. Hugging Face
+Spaces with a GPU, RunPod, Lambda or a bare GPU VM) rather than on serverless.
+The ASGI export above works unchanged on those platforms too.
+
 ## 📚 Citation
 
 If you find our work useful in your research, please consider citing:
