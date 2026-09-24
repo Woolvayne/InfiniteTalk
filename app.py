@@ -841,7 +841,15 @@ def build_demo(args, lazy_model_init=False):
 def run_graio_demo(args):
     """CLI entry point: build the demo and serve it locally."""
     demo = build_demo(args)
-    demo.launch(server_name="0.0.0.0", debug=True, server_port=8418)
+    demo.launch(
+        server_name="0.0.0.0",
+        # GRADIO_SHARE=1 publishes a public *.gradio.live URL (handy when
+        # running inside Colab/Kaggle, where the port is not reachable).
+        share=os.environ.get("GRADIO_SHARE", "0") == "1",
+        # GRADIO_DEBUG=0 disables the file-watching reloader, which does not
+        # play nicely with notebook environments.
+        debug=os.environ.get("GRADIO_DEBUG", "1") == "1",
+        server_port=8418)
 
 
 def _adapt_args_for_serverless(args):

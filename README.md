@@ -398,6 +398,25 @@ Useful environment variables:
 | `AUDIO_SAVE_DIR` | `save_audio/gradio` | Where audio embeddings are written. On Vercel this is switched to `/tmp/save_audio` automatically, because the rest of the filesystem is read-only. |
 | `VERCEL` | – | Set by Vercel itself; triggers the serverless path adaptations above. |
 
+### Test run on 16 GB (Colab / Kaggle)
+
+If you just want to try the model before committing to a GPU host, use the
+ready-made notebook
+[`notebooks/InfiniteTalk_16GB_Test.ipynb`](notebooks/InfiniteTalk_16GB_Test.ipynb).
+It checks your runtime (VRAM / RAM / disk), installs the dependencies,
+downloads only the weights your hardware needs and starts the app with a
+public `*.gradio.live` URL:
+
+| Runtime | What happens |
+| --- | --- |
+| >= 30 GB VRAM (A100) | full bf16 model, best quality |
+| >= 17 GB VRAM (RTX 3090/4090, L4) | fp8 weights stay on the GPU |
+| < 17 GB VRAM but >= 21 GB RAM | fp8 weights + T5 offloaded to CPU (slow) |
+| Colab free T4 / Kaggle P100 (16 GB VRAM, 12-13 GB RAM) | the notebook tells you up front that this is not enough |
+
+`--quant int8` is not an option: the repository only ships a quantized T5 for
+fp8, so int8 fails while loading.
+
 Please note the platform limits before deploying: Vercel serverless functions
 are capped at 250 MB (bundle), have no GPU and are limited to `maxDuration`
 seconds per request. The InfiniteTalk checkpoints are multi-gigabyte and need a
